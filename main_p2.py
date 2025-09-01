@@ -103,6 +103,7 @@ def main():
     action_size = brain.vector_action_space_size
 
     # examine the state space 
+    env_info = env.reset(train_mode=True)[brain_name]
     states = env_info.vector_observations
     state_size = states.shape[1]
 
