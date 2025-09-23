@@ -14,8 +14,8 @@ BUFFER_SIZE = int(1e6)  # replay buffer size
 BATCH_SIZE = 128        # minibatch size
 GAMMA = 0.99            # discount factor
 TAU = 1e-3              # for soft update of target parameters
-LR_ACTOR = 1e-3         # learning rate of the actor
-LR_CRITIC = 1e-3        # learning rate of the critic
+LR_ACTOR = 0.5e-4         # learning rate of the actor
+LR_CRITIC = 1e-4        # learning rate of the critic
 WEIGHT_DECAY = 0        # L2 weight decay
 UPDATE_EVERY = 20       # learning timestep interval
 NUM_PASSES = 10         # number of learning passes
@@ -56,21 +56,24 @@ class Agent:
 
         # Replay memory
         self.replay = PrioritizedReplayBuffer(action_size, BUFFER_SIZE, BATCH_SIZE, seed)
+        self.counter = 0
     
     def step(self, state, action, reward, next_state, done, step_num):
         """Save experience in replay memory, and learn."""
 
         # Save experience in replay memory
         self.replay.add(state, action, reward, next_state, done)
+        self.counter += 1
         
         # Learn every UPDATE_EVERY time steps.
-        if len(self.replay) > BATCH_SIZE and step_num % UPDATE_EVERY == 0:
+        if self.counter >= BATCH_SIZE and step_num % UPDATE_EVERY == 0:
             for _ in range(NUM_PASSES):
                 self.learn(GAMMA)  
+            # self.counter = 0 # TO RECHECK ALGORITHM LATER
         
         # Update beta for PER at the end of the episode
         if done:
-            self.replay.update_beta
+            self.replay.update_beta()
 
     def act(self, state, noise=True):
         """Returns actions for given state as per current policy.
@@ -84,12 +87,13 @@ class Agent:
         state = torch.from_numpy(state).float().unsqueeze(0).to(device)
         self.actor.eval()
         with torch.no_grad():
-            action_values = self.actor(state)
+            action_values = self.actor(state[0])
+            # action_values = self.actor(state).squeeze(0) #Claude
         self.actor.train()
 
         # Add noise
         if noise:
-            action_values += self.epsilon * self.noise.sample()
+            action_values += self.epsilon * torch.from_numpy(self.noise.sample()).to(action_values.device).type_as(action_values)
         return np.clip(action_values, -1, 1)
 
     def learn(self, gamma):
@@ -100,8 +104,17 @@ class Agent:
             experiences (Tuple[torch.Tensor]): tuple of (s, a, r, s', done) tuples 
             gamma (float): discount factor
         """
+        #Claude
         # Get random sample and compute priority weights
-        states, actions, rewards, next_states, dones, priorities, indices = self.replay.sample()
+        sample_result = self.replay.sample()
+        
+        # Check if we got valid samples
+        if sample_result[0] is None:
+            return
+        states, actions, rewards, next_states, dones, priorities, indices = sample_result
+
+        # # Get random sample and compute priority weights
+        # states, actions, rewards, next_states, dones, priorities, indices = self.replay.sample()
 
         # Update critic ---------------------------------------------------------------#
         next_actions = self.actor_target(next_states)
@@ -130,12 +143,12 @@ class Agent:
         actor_loss.backward()
         self.actor_optimizer.step()
 
-        # Update target ----------------------------------------------------------------#
+        # Update target ---------------------------------------------------------------#
         self.soft_update(self.critic, self.critic_target, TAU)
         self.soft_update(self.actor, self.actor_target, TAU)
 
-        # Update noise -----------------------------------------------------------------#
-        self.epsilon -= EPSILON_DECAY
+        # Update noise ----------------------------------------------------------------#
+        self.epsilon = max(0, self.epsilon - EPSILON_DECAY)
         self.noise.reset()
 
     def soft_update(self, local_model, target_model, tau):

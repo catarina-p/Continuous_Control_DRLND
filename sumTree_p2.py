@@ -8,7 +8,8 @@ class SumTree:
     def __init__(self, capacity):
         self.capacity = capacity
         self.tree = np.zeros( 2*capacity - 1 )
-        self.data = np.zeros( capacity, dtype=object )
+        # self.data = np.zeros( capacity, dtype=object )
+        self.data = [None] * capacity #Claude
     
     def _propagate(self, idx, change):
         parent = (idx - 1) // 2

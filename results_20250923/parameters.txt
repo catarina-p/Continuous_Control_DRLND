@@ -1,0 +1,19 @@
+BUFFER_SIZE = int(1e6)  # replay buffer size
+BATCH_SIZE = 128        # minibatch size
+GAMMA = 0.99            # discount factor
+TAU = 1e-3              # for soft update of target parameters
+LR_ACTOR = 0.5e-4         # learning rate of the actor
+LR_CRITIC = 1e-4        # learning rate of the critic
+WEIGHT_DECAY = 0        # L2 weight decay
+UPDATE_EVERY = 20       # learning timestep interval
+NUM_PASSES = 10         # number of learning passes
+EPSILON = 1.0           # explore->exploit noise process added to act step
+EPSILON_DECAY = 1e-6    # decay rate for noise process
+
+# Prioritized Replay parameters
+# In the orignal paper, alpha~0.7 and beta_i~0.5
+SMALL = 0.0001  #P(i)~(|TD_error|+SMALL)^\alpha
+alpha = 0.7 #0.8     #P(i)~(|TD_error|+SMALL)^\alpha
+beta_i = 0.5 #0.7    #w_i =(1/(N*P(i)))^\beta
+beta_f = 1.
+beta_update_steps = 1000

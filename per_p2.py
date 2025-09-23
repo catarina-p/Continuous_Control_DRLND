@@ -1,5 +1,6 @@
 import numpy as np
 from collections import namedtuple, deque
+import random
 
 from sumTree_p2 import SumTree
 
@@ -41,12 +42,17 @@ class PrioritizedReplayBuffer:
         # clipping [-1,1] is used in a 'custom loss function'
         self.p_max = 1.+SMALL #initial priority with max value in [-1,1]
         self.priorities = deque(maxlen = buffer_size) #Importance sampling weights
+
+        # Track number of experiences added (Claude)
+        self.n_entries = 0
+        self.buffer_size = buffer_size
     
     def add(self, state, action, reward, next_state, done):
         """Add a new experience to memory."""
         e = tuple((state, action, reward, next_state, done, self.p_max))
         # priority = TD_error
         self.tree_memory.add(self.p_max, e)
+        self.n_entries = min(self.n_entries + 1, self.buffer_size) #Claude
     
     def sample(self):
         """Randomly sample a batch of experiences from memory"""
@@ -60,8 +66,20 @@ class PrioritizedReplayBuffer:
             b = segment*(i+1)
             rd = np.round(np.random.uniform(a,b),6) #should fix some problems with idx
             idx, priority, data = self.tree_memory.get(rd)
-           
+            # experiences.append( data + (priority,) + (idx,) )
+
+            # Skip if data is not valid (happens when buffer not full) (Claude)
+            if data is None or not isinstance(data, tuple):
+                continue
+            
             experiences.append( data + (priority,) + (idx,) )
+            # experiences.append(data)
+            # priorities.append(priority)
+            # indices.append(idx)
+
+        # # Check if we have enough valid experiences
+        # if len(experiences) == 0:
+        #     return None, None, None, None, None, None, None
 
         states = torch.from_numpy(np.vstack([e[0] for e in experiences if e is not None])).float().to(device)
         actions = torch.from_numpy(np.vstack([e[1] for e in experiences if e is not None])).float().to(device)
@@ -92,18 +110,48 @@ class PrioritizedReplayBuffer:
     #     loss = torch.sum(tw*loss)
     #     return loss
     
-
+    # Claude
     def PER_loss(self, Q_expected, Q_target, weights):
-        # Element-wise Huber loss
-        loss = F.smooth_l1_loss(Q_expected, Q_target, reduction="none")
-        # Apply IS weights
-        weighted_loss = (weights * loss).mean()
-        return weighted_loss
+        """Calculate PER loss with importance sampling weights.
+        
+        Args:
+            Q_expected: Current Q-values from critic
+            Q_targets: Target Q-values 
+            weights: Importance sampling weights
+            
+        Returns:
+            Weighted loss for backpropagation
+        """
+        # Convert weights to tensor if needed
+        if not isinstance(weights, torch.Tensor):
+            weights = torch.tensor(weights, dtype=torch.float32, device=device)
+        
+        # Ensure weights have the right shape [batch_size, 1]
+        if weights.dim() == 1:
+            weights = weights.unsqueeze(1)
+        
+        # Calculate element-wise TD errors
+        # td_errors = Q_target - Q_expected
+        
+        # Use Huber loss (smooth L1) which is more stable than MSE
+        # This is equivalent to: 
+        # - squared loss for small errors (|error| < 1)
+        # - linear loss for large errors (|error| >= 1)
+        element_wise_loss = F.smooth_l1_loss(Q_expected, Q_target.detach(), reduction='none')
+        
+        # Apply importance sampling weights
+        weighted_loss = weights * element_wise_loss
+        
+        # Return mean weighted loss
+        return weighted_loss.mean()
 
     
     def update_beta(self):
         # linearly increasing from beta_i~0.5 to beta_f = 1
-        self.beta = (beta_f-beta_i)*(self.step_beta-1)/(beta_update_steps-1) + beta_i
+        # self.beta = (beta_f-beta_i)*(self.step_beta-1)/(beta_update_steps-1) + beta_i
+        #Claude
+        self.step_beta += 1
+        self.beta = min(beta_f, (beta_f-beta_i)*(self.step_beta-1)/(beta_update_steps-1) + beta_i)
 
     # def compute_weights(self, priorities):
     #     #compute importance sampling weight, before the update
@@ -114,22 +162,70 @@ class PrioritizedReplayBuffer:
     #     return weights
 
     def compute_weights(self, priorities):
+        """Compute importance sampling weights for PER.
+
+        Args:
+            priorities: List or array of priorities for sampled experiences
+            
+        Returns:
+            Normalized importance sampling weights
+        """
+        # Convert to numpy array if needed
+        priorities = np.array(priorities)
+
+        # Avoid division by zero
+        priorities = np.maximum(priorities, 1e-8)
+
         # Compute sampling probabilities
-        probs = priorities / self.tree_memory.total()
-        N = len(self.tree_memory.data)  # current number of stored experiences
-        # Importance-sampling weights
-        weights = (N * probs) ** (-self.beta)
-        weights /= weights.max()  # normalize for stability
+        total_priority = self.tree_memory.total()
+        if total_priority == 0:
+            # If no priorities yet, return uniform weights
+            return np.ones(len(priorities))
+
+        probs = priorities / total_priority
+
+        # Use actual number of stored experiences
+        N = self.n_entries
+
+        # Importance-sampling weights: w_i = (N * P(i))^(-beta)
+        weights = np.power(N * probs, -self.beta)
+
+        # Normalize weights by dividing by max weight for stability
+        weights = weights / weights.max()
+
         return weights
 
 
     def update_priorities(self, Qexpected, Qtarget, indices):
+        # with torch.no_grad():
+        #         p = torch.abs(Qtarget - Qexpected)
+        #         p = (p.cpu().numpy()+ SMALL)**alpha
+        #         for j, idx in enumerate(indices):
+        #             self.tree_memory.update(idx, p[j][0])
+        #Claude
+        """Update priorities in the SumTree based on TD errors.
+        
+        Args:
+            Qexpected: Current Q-values from critic
+            Qtarget: Target Q-values
+            indices: Indices of experiences in the SumTree
+        """
         with torch.no_grad():
-                p = torch.abs(Qtarget - Qexpected)
-                p = (p.cpu().numpy()+ SMALL)**alpha
-                for j, idx in enumerate(indices):
-                    self.tree_memory.update(idx, p[j])
+            # Calculate TD errors
+            td_errors = torch.abs(Qtarget - Qexpected)
+            
+            # Convert to numpy and flatten if needed
+            td_errors = td_errors.cpu().numpy()
+            if td_errors.ndim > 1:
+                td_errors = td_errors.flatten()
+            
+            # Calculate new priorities: P(i) = (|TD_error| + ε)^α
+            new_priorities = np.power(td_errors + SMALL, alpha)
+            
+            # Update each priority in the tree
+            for idx, priority in zip(indices, new_priorities):
+                self.tree_memory.update(idx, priority)
     
-    def __len__(self):
-        """Return the current size of internal memory."""
-        return len(self.memory)
+    # def __len__(self):
+    #     """Return the current size of internal memory."""
+    #     return len(self.tree_memory)
